@@ -220,6 +220,40 @@ def save_rule(rule_text, name, path):
 
 _PROP_LINE_RE = re.compile(r'^\s*[\w:]+\s*=\s*\S')
 
+
+def _load_existing_names(path):
+    try:
+        with open(os.path.expanduser(path)) as f:
+            content = f.read()
+    except OSError:
+        return []
+    return re.findall(r'^\s*name\s*=\s*(.+?)\s*$', content, re.MULTILINE)
+
+
+def _find_existing_rule(name, path):
+    try:
+        with open(os.path.expanduser(path)) as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if re.match(r'\s*windowrule\s*\{', line):
+            block = [line]
+            depth = line.count('{') - line.count('}')
+            i += 1
+            while i < len(lines) and depth > 0:
+                block.append(lines[i])
+                depth += lines[i].count('{') - lines[i].count('}')
+                i += 1
+            if re.search(rf'^\s*name\s*=\s*{re.escape(name)}\s*$',
+                         ''.join(block), re.MULTILINE):
+                return ''.join(block).rstrip()
+        else:
+            i += 1
+    return None
+
 FIELDS = [
     ('name',   'Name'),
     ('class',  'Class'),
@@ -264,17 +298,25 @@ class HyprGlazWindow(Gtk.ApplicationWindow):
         grid = Gtk.Grid(row_spacing=6, column_spacing=12)
         root.append(grid)
 
+        existing_names = _load_existing_names(output_path)
+
         self.entries = {}
+        name_row = next(i for i, (k, _) in enumerate(FIELDS) if k == 'name')
         for row, (key, label) in enumerate(FIELDS):
+            # shift rows after name down by 1 to reserve space for suggestion bar
+            grid_row = row if row <= name_row else row + 1
             lbl = Gtk.Label(label=label)
             lbl.set_halign(Gtk.Align.END)
             lbl.set_size_request(110, -1)
-            entry = Gtk.Entry()
-            entry.set_text(defaults[key])
-            entry.set_hexpand(True)
-            entry.connect('changed', lambda _e: self._refresh())
-            grid.attach(lbl,   0, row, 1, 1)
-            grid.attach(entry, 1, row, 1, 1)
+            if key == 'name':
+                entry = self._make_name_entry(defaults[key], existing_names, grid, name_row)
+            else:
+                entry = Gtk.Entry()
+                entry.set_text(defaults[key])
+                entry.set_hexpand(True)
+                entry.connect('changed', lambda _e: self._refresh())
+            grid.attach(lbl,   0, grid_row, 1, 1)
+            grid.attach(entry, 1, grid_row, 1, 1)
             self.entries[key] = entry
 
         prop_lbl = Gtk.Label(label='Extra Properties')
@@ -297,7 +339,7 @@ class HyprGlazWindow(Gtk.ApplicationWindow):
         prop_scroll.set_min_content_height(80)
         prop_scroll.set_child(prop_tv)
 
-        prop_row = len(FIELDS)
+        prop_row = len(FIELDS) + 1
         grid.attach(prop_lbl,    0, prop_row, 1, 1)
         grid.attach(prop_scroll, 1, prop_row, 1, 1)
 
@@ -312,25 +354,44 @@ class HyprGlazWindow(Gtk.ApplicationWindow):
         sep.set_margin_bottom(4)
         root.append(sep)
 
-        lbl = Gtk.Label(label='Generated Rule')
-        lbl.set_halign(Gtk.Align.START)
-        root.append(lbl)
+        rule_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        rule_row.set_vexpand(True)
+        root.append(rule_row)
 
+        def _make_rule_tv(buf):
+            tv = Gtk.TextView(buffer=buf)
+            tv.set_editable(False)
+            tv.set_monospace(True)
+            tv.set_left_margin(8)
+            tv.set_top_margin(6)
+            tv.set_bottom_margin(6)
+            tv.set_wrap_mode(Gtk.WrapMode.NONE)
+            sw = Gtk.ScrolledWindow()
+            sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+            sw.set_min_content_height(140)
+            sw.set_vexpand(True)
+            sw.set_hexpand(True)
+            sw.set_child(tv)
+            return sw
+
+        new_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        new_col.set_hexpand(True)
+        new_lbl = Gtk.Label(label='Generated Rule')
+        new_lbl.set_halign(Gtk.Align.START)
+        new_col.append(new_lbl)
         self._buf = Gtk.TextBuffer()
-        tv = Gtk.TextView(buffer=self._buf)
-        tv.set_editable(False)
-        tv.set_monospace(True)
-        tv.set_left_margin(8)
-        tv.set_top_margin(6)
-        tv.set_bottom_margin(6)
-        tv.set_wrap_mode(Gtk.WrapMode.NONE)
+        new_col.append(_make_rule_tv(self._buf))
+        rule_row.append(new_col)
 
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
-        scroll.set_min_content_height(140)
-        scroll.set_vexpand(True)
-        scroll.set_child(tv)
-        root.append(scroll)
+        self._existing_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self._existing_col.set_hexpand(True)
+        self._existing_col.set_visible(False)
+        existing_lbl = Gtk.Label(label='Existing Rule')
+        existing_lbl.set_halign(Gtk.Align.START)
+        self._existing_col.append(existing_lbl)
+        self._existing_buf = Gtk.TextBuffer()
+        self._existing_col.append(_make_rule_tv(self._existing_buf))
+        rule_row.append(self._existing_col)
 
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         btn_row.set_halign(Gtk.Align.END)
@@ -353,6 +414,41 @@ class HyprGlazWindow(Gtk.ApplicationWindow):
 
         self._refresh()
 
+    def _make_name_entry(self, default_text, existing_names, grid, name_row):
+        entry = Gtk.Entry()
+        entry.set_text(default_text)
+        entry.set_hexpand(True)
+
+        if not existing_names:
+            entry.connect('changed', lambda _e: self._refresh())
+            return entry
+
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        btn_scroll = Gtk.ScrolledWindow()
+        btn_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        btn_scroll.set_child(btn_box)
+        btn_scroll.set_visible(False)
+        grid.attach(btn_scroll, 1, name_row + 1, 1, 1)
+
+        def on_changed(e):
+            self._refresh()
+            text = e.get_text().lower()
+            while child := btn_box.get_first_child():
+                btn_box.remove(child)
+            matches = [n for n in existing_names if text in n.lower()] if text else []
+            for name in matches:
+                btn = Gtk.Button(label=name)
+                btn.add_css_class('flat')
+                def on_clicked(_b, n=name):
+                    entry.set_text(n)
+                    entry.grab_focus()
+                btn.connect('clicked', on_clicked)
+                btn_box.append(btn)
+            btn_scroll.set_visible(bool(matches))
+
+        entry.connect('changed', on_changed)
+        return entry
+
     def _values(self):
         v = {k: e.get_text() for k, e in self.entries.items()}
         buf = self._prop_buf
@@ -374,6 +470,12 @@ class HyprGlazWindow(Gtk.ApplicationWindow):
 
     def _refresh(self):
         self._buf.set_text(self._current_rule(), -1)
+        existing = _find_existing_rule(self._values()['name'], self._output_path)
+        if existing:
+            self._existing_buf.set_text(existing, -1)
+            self._existing_col.set_visible(True)
+        else:
+            self._existing_col.set_visible(False)
         v = self._values()
         errors = self._prop_errors(v['prop'])
         if errors:
