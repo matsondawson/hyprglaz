@@ -1,27 +1,18 @@
 #!/usr/bin/env python3
 
 import argparse
+import cairo
 import gi
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 
 gi.require_version('Gtk', '4.0')
-from gi.repository import GLib, Gio, Gtk
-
-
-def select_region():
-    result = subprocess.run(['slurp'], capture_output=True, text=True)
-    return result.stdout.strip() if result.returncode == 0 else None
-
-
-def parse_region(region):
-    m = re.match(r'(\d+),(\d+)\s+(\d+)x(\d+)', region)
-    if not m:
-        return None
-    return tuple(int(x) for x in m.groups())
+gi.require_version('Gdk', '4.0')
+from gi.repository import Gdk, GLib, Gio, Gtk
 
 
 def active_workspace_id():
@@ -29,22 +20,122 @@ def active_workspace_id():
     return json.loads(raw)['id']
 
 
-def find_window(rx, ry, rw, rh, ws_id):
-    raw = subprocess.check_output(['hyprctl', 'clients', '-j'], text=True)
-    matches = []
-    for c in json.loads(raw):
-        if not c.get('mapped') or c.get('hidden'):
-            continue
-        if c.get('workspace', {}).get('id') != ws_id:
-            continue
-        cx, cy = c['at']
-        cw, ch = c['size']
-        if cx < rx + rw and cx + cw > rx and cy < ry + rh and cy + ch > ry:
-            matches.append(c)
-    if not matches:
+def _priority(c):
+    return (0 if c.get('floating') else 1, c.get('focusHistoryID', 9999))
+
+
+def _top_window_at(clients, ws_id, x, y):
+    matches = [
+        c for c in clients
+        if c.get('mapped') and not c.get('hidden')
+        and c.get('workspace', {}).get('id') == ws_id
+        and c['at'][0] <= x < c['at'][0] + c['size'][0]
+        and c['at'][1] <= y < c['at'][1] + c['size'][1]
+    ]
+    return min(matches, key=_priority) if matches else None
+
+
+def _take_screenshot():
+    fd, path = tempfile.mkstemp(suffix='.png', prefix='hyprglaz-')
+    os.close(fd)
+    r = subprocess.run(['grim', path], capture_output=True)
+    if r.returncode != 0:
+        os.unlink(path)
         return None
-    return min(matches, key=lambda c: (0 if c.get('floating') else 1,
-                                       c.get('focusHistoryID', 9999)))
+    return path
+
+
+class _PickerApp(Gtk.Application):
+
+    def __init__(self, clients, ws_id, screenshot_path):
+        super().__init__(application_id='land.hypr.glaz.picker',
+                         flags=Gio.ApplicationFlags.NON_UNIQUE)
+        self._clients = clients
+        self._ws_id = ws_id
+        self._screenshot_path = screenshot_path
+        self._screenshot_surface = None
+        self.result = None
+        self._hovered = None
+        self.connect('activate', self._on_activate)
+
+    def _on_activate(self, _app):
+        if self._screenshot_path:
+            self._screenshot_surface = cairo.ImageSurface.create_from_png(
+                self._screenshot_path)
+
+        win = Gtk.ApplicationWindow(application=self)
+        win.set_decorated(False)
+        win.set_title('hyprglaz-picker')
+        win.fullscreen()
+
+        area = Gtk.DrawingArea()
+        area.set_draw_func(self._draw)
+        area.set_hexpand(True)
+        area.set_vexpand(True)
+        win.set_child(area)
+        self._area = area
+
+        mc = Gtk.EventControllerMotion()
+        mc.connect('motion', self._on_motion)
+        win.add_controller(mc)
+
+        gc = Gtk.GestureClick()
+        gc.connect('pressed', self._on_click)
+        win.add_controller(gc)
+
+        kc = Gtk.EventControllerKey()
+        kc.connect('key-pressed', self._on_key)
+        win.add_controller(kc)
+
+        win.present()
+        self._win = win
+
+    def _on_motion(self, _ctrl, x, y):
+        h = _top_window_at(self._clients, self._ws_id, x, y)
+        if h is not self._hovered:
+            self._hovered = h
+            self._area.queue_draw()
+
+    def _draw(self, _area, cr, _w, _h):
+        if self._screenshot_surface:
+            cr.set_source_surface(self._screenshot_surface, 0, 0)
+            cr.paint()
+        cr.set_source_rgba(0, 0, 0, 0.4)
+        cr.paint()
+        if self._hovered:
+            x, y = self._hovered['at']
+            w, h = self._hovered['size']
+            cr.set_source_rgba(0.15, 0.55, 1.0, 0.25)
+            cr.rectangle(x, y, w, h)
+            cr.fill()
+            cr.set_source_rgba(0.15, 0.55, 1.0, 0.9)
+            cr.set_line_width(3)
+            cr.rectangle(x, y, w, h)
+            cr.stroke()
+
+    def _on_click(self, _g, _n, _x, _y):
+        self.result = self._hovered
+        self._win.close()
+        self.quit()
+
+    def _on_key(self, _c, keyval, _kc, _state):
+        if keyval == Gdk.KEY_Escape:
+            self._win.close()
+            self.quit()
+        return False
+
+
+def pick_window(ws_id):
+    screenshot_path = _take_screenshot()
+    try:
+        raw = subprocess.check_output(['hyprctl', 'clients', '-j'], text=True)
+        clients = json.loads(raw)
+        app = _PickerApp(clients, ws_id, screenshot_path)
+        app.run([])
+        return app.result
+    finally:
+        if screenshot_path and os.path.exists(screenshot_path):
+            os.unlink(screenshot_path)
 
 
 def re_escape(s):
@@ -320,7 +411,7 @@ def error_app(msg):
 def main():
     parser = argparse.ArgumentParser(
         prog='hyprglaz',
-        description='Select a window region and generate a Hyprland windowrule.',
+        description='Select a window and generate a Hyprland windowrule.',
     )
     parser.add_argument(
         '-o', '--output',
@@ -330,25 +421,15 @@ def main():
     )
     args = parser.parse_args()
 
-    region = select_region()
-    if not region:
-        sys.exit(0)
-
-    coords = parse_region(region)
-    if not coords:
-        error_app('Could not parse slurp output.')
-        sys.exit(1)
-
     try:
         ws_id = active_workspace_id()
-        win_info = find_window(*coords, ws_id)
+        win_info = pick_window(ws_id)
     except Exception as e:
         error_app(str(e))
         sys.exit(1)
 
     if not win_info:
-        error_app('No window found in the selected region.')
-        sys.exit(1)
+        sys.exit(0)
 
     sys.exit(HyprGlazApp(win_info, os.path.expanduser(args.output)).run([]))
 

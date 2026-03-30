@@ -2,7 +2,9 @@
 
 A Hyprland window rule generator. Draw a region on screen, and hyprglaz finds the window underneath and builds a `windowrule` block you can copy or save directly to your config.
 
-![Screenshot](screenshot.png)
+![Window picker](screenshot_select.png)
+
+![Rule editor](screenshot.png)
 
 ## Usage
 
@@ -10,7 +12,7 @@ A Hyprland window rule generator. Draw a region on screen, and hyprglaz finds th
 ./hyprglaz.py
 ```
 
-Draw a selection box over any part of a window. hyprglaz queries Hyprland for the topmost visible window in that region on the active workspace and opens the editor.
+Move your cursor over a window — hyprglaz highlights it with a hover rectangle. Click to select; the topmost visible window on the active workspace opens in the editor. Press Escape to cancel.
 
 ### Options
 
@@ -47,14 +49,15 @@ Replace `/path/to/hyprglaz.py` with the absolute path to the script, or move it 
 |---|---|---|
 | Python 3 | `python` | Runtime |
 | GTK 4 + GObject introspection | `gtk4` `python-gobject` | UI |
-| slurp | `slurp` | Region selection |
+| pycairo | `python-cairo` | Cairo bindings for picker drawing |
+| grim | `grim` | Screenshot for picker background |
 | Hyprland | `hyprland` | Window data via `hyprctl` |
 | wl-clipboard | `wl-clipboard` | Clipboard (`wl-copy`) |
 
 Install all at once on Arch:
 
 ```bash
-sudo pacman -S python python-gobject gtk4 slurp wl-clipboard
+sudo pacman -S python python-gobject python-cairo gtk4 grim wl-clipboard
 ```
 
 ## License
