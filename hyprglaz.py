@@ -218,6 +218,8 @@ def save_rule(rule_text, name, path):
     return 'replaced' if replaced else 'appended'
 
 
+_PROP_LINE_RE = re.compile(r'^\s*[\w:]+\s*=\s*\S')
+
 FIELDS = [
     ('name',   'Name'),
     ('class',  'Class'),
@@ -299,6 +301,12 @@ class HyprGlazWindow(Gtk.ApplicationWindow):
         grid.attach(prop_lbl,    0, prop_row, 1, 1)
         grid.attach(prop_scroll, 1, prop_row, 1, 1)
 
+        self._prop_warn = Gtk.Label()
+        self._prop_warn.set_halign(Gtk.Align.START)
+        self._prop_warn.add_css_class('error')
+        self._prop_warn.set_visible(False)
+        grid.attach(self._prop_warn, 1, prop_row + 1, 1, 1)
+
         sep = Gtk.Separator()
         sep.set_margin_top(4)
         sep.set_margin_bottom(4)
@@ -356,8 +364,26 @@ class HyprGlazWindow(Gtk.ApplicationWindow):
         return build_rule(v['name'], v['class'], v['iclass'],
                           v['title'], v['ititle'], v['size'], v['prop'])
 
+    def _prop_errors(self, text):
+        bad = []
+        for i, line in enumerate(text.splitlines(), 1):
+            s = line.strip()
+            if s and not s.startswith('#') and not _PROP_LINE_RE.match(line):
+                bad.append(i)
+        return bad
+
     def _refresh(self):
         self._buf.set_text(self._current_rule(), -1)
+        v = self._values()
+        errors = self._prop_errors(v['prop'])
+        if errors:
+            self._prop_warn.set_label(f'Invalid line(s): {", ".join(map(str, errors))} — expected: key = value')
+            self._prop_warn.set_visible(True)
+        else:
+            self._prop_warn.set_visible(False)
+        sensitive = not errors
+        self._copy_btn.set_sensitive(sensitive)
+        self._save_btn.set_sensitive(sensitive)
 
     def _on_copy(self, btn):
         subprocess.run(['wl-copy', '--', self._current_rule()])

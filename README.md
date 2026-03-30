@@ -1,6 +1,6 @@
 # hyprglaz
 
-A Hyprland window rule generator. Draw a region on screen, and hyprglaz finds the window underneath and builds a `windowrule` block you can copy or save directly to your config.
+A Hyprland window rule generator. Set up your window the way you want it, select it with hyprglaz, then copy or save the generated `windowrule` block directly to your config.
 
 ![Window picker](screenshot_select.png)
 
@@ -59,6 +59,10 @@ Install all at once on Arch:
 ```bash
 sudo pacman -S python python-gobject python-cairo gtk4 grim wl-clipboard
 ```
+
+## References
+
+- [Hyprland Window Rules](https://wiki.hypr.land/Configuring/Window-Rules/)
 
 ## License
 
