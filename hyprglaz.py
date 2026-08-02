@@ -142,6 +142,12 @@ def re_escape(s):
     return re.sub(r'([.+*?^${}()\[\]|\\])', r'\\\1', s)
 
 
+def lua_str(s):
+    if '\\' in s and ']]' not in s and not s.endswith(']'):
+        return f'[[{s}]]'
+    return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
 def gen_name(iclass, ititle):
     parts = [p for p in (iclass, ititle) if p]
     base = '-'.join(parts) if parts else 'window'
@@ -150,108 +156,148 @@ def gen_name(iclass, ititle):
 
 
 def build_rule(name, class_, iclass, title, ititle, size, prop):
-    lines = ['windowrule {', f'  name = {name}']
-    if class_:
-        lines.append(f'  match:class = {class_}')
-    if iclass:
-        lines.append(f'  match:initial_class = {iclass}')
-    if title:
-        lines.append(f'  match:title = {title}')
-    if ititle:
-        lines.append(f'  match:initial_title = {ititle}')
-    lines.append('')
-    if size:
-        lines.append(f'  size = {size}')
+    lines = ['hl.window_rule({', f'    name  = {lua_str(name)},']
+
+    match = [f'        {key} = {lua_str(val)},' for key, val in (
+        ('class', class_), ('initial_class', iclass),
+        ('title', title), ('initial_title', ititle)) if val]
+    if match:
+        lines.append('    match = {')
+        lines.extend(match)
+        lines.append('    },')
+
+    props = [f'    size  = {lua_str(size)},'] if size else []
     for p in prop.splitlines():
-        if p.strip():
-            lines.append(f'  {p.strip()}')
-    lines.append('}')
+        s = p.strip()
+        if s.startswith('--'):
+            props.append(f'    {s}')
+        elif s:
+            props.append(f'    {s.rstrip(",")},')
+
+    if props:
+        lines.append('')
+        lines.extend(props)
+    lines.append('})')
     return '\n'.join(lines)
 
 
-DEFAULT_CONF = '~/.config/hypr/conf/windowrules/custom.conf'
+DEFAULT_CONF = '~/.config/hypr/conf/windowrules/custom.lua'
+
+_RULE_START_RE = re.compile(r'^[^\S\n]*hl\.window_rule\s*\(\s*\{', re.MULTILINE)
+
+_NAME_RE = re.compile(
+    r'^\s*name\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|\[\[(.*?)\]\])\s*,?\s*$',
+    re.MULTILINE)
+
+
+def _blank_literals(text):
+    """Blank out Lua strings and comments (keeping newlines) so braces can be counted."""
+    out = list(text)
+    i, n = 0, len(text)
+
+    def blank(start, end):
+        for k in range(start, min(end, n)):
+            if out[k] != '\n':
+                out[k] = ' '
+
+    def close_at(start, token):
+        end = text.find(token, start)
+        return n if end < 0 else end + len(token)
+
+    while i < n:
+        if text.startswith('--[[', i):
+            end = close_at(i + 4, ']]')
+        elif text.startswith('--', i):
+            end = text.find('\n', i)
+            end = n if end < 0 else end
+        elif text.startswith('[[', i):
+            end = close_at(i + 2, ']]')
+        elif text[i] in '"\'':
+            j = i + 1
+            while j < n and text[j] != text[i] and text[j] != '\n':
+                j += 2 if text[j] == '\\' else 1
+            end = min(j + 1, n)
+        else:
+            i += 1
+            continue
+        blank(i, end)
+        i = end
+
+    return ''.join(out)
+
+
+def _rule_blocks(text):
+    """Yield (start, end) character spans of each hl.window_rule({ ... }) call."""
+    blank = _blank_literals(text)
+    for m in _RULE_START_RE.finditer(blank):
+        depth = 0
+        for i in range(m.start(), len(blank)):
+            if blank[i] == '{':
+                depth += 1
+            elif blank[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    while end < len(blank) and blank[end] in ' \t':
+                        end += 1
+                    if end < len(blank) and blank[end] == ')':
+                        end += 1
+                    yield m.start(), end
+                    break
+
+
+def _block_name(block):
+    m = _NAME_RE.search(block)
+    if not m:
+        return None
+    return next(g for g in m.groups() if g is not None)
+
+
+def _read_config(path):
+    try:
+        with open(os.path.expanduser(path)) as f:
+            return f.read()
+    except OSError:
+        return ''
 
 
 def save_rule(rule_text, name, path):
+    path = os.path.expanduser(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    content = _read_config(path)
 
-    if not os.path.exists(path):
-        with open(path, 'w') as f:
-            f.write(rule_text + '\n')
-        return 'appended'
-
-    with open(path, 'r') as f:
-        lines = f.readlines()
-
-    result = []
-    replaced = False
-    i = 0
-
-    while i < len(lines):
-        line = lines[i]
-        if re.match(r'\s*windowrule\s*\{', line):
-            block = [line]
-            depth = line.count('{') - line.count('}')
-            i += 1
-            while i < len(lines) and depth > 0:
-                block.append(lines[i])
-                depth += lines[i].count('{') - lines[i].count('}')
-                i += 1
-            if re.search(rf'^\s*name\s*=\s*{re.escape(name)}\s*$',
-                         ''.join(block), re.MULTILINE):
-                result.append(rule_text + '\n')
-                replaced = True
-            else:
-                result.extend(block)
-        else:
-            result.append(line)
-            i += 1
-
-    if not replaced:
-        if result and not result[-1].endswith('\n'):
-            result.append('\n')
-        result.append('\n' + rule_text + '\n')
+    for start, end in _rule_blocks(content):
+        if _block_name(content[start:end]) == name:
+            content = content[:start] + rule_text + content[end:]
+            action = 'replaced'
+            break
+    else:
+        sep = '' if not content.strip() else (
+            '\n' if content.endswith('\n') else '\n\n')
+        content = content + sep + rule_text + '\n'
+        action = 'appended'
 
     with open(path, 'w') as f:
-        f.writelines(result)
+        f.write(content)
 
-    return 'replaced' if replaced else 'appended'
+    return action
 
 
-_PROP_LINE_RE = re.compile(r'^\s*[\w:]+\s*=\s*\S')
+_PROP_LINE_RE = re.compile(r'^\s*[A-Za-z_]\w*\s*=\s*\S')
 
 
 def _load_existing_names(path):
-    try:
-        with open(os.path.expanduser(path)) as f:
-            content = f.read()
-    except OSError:
-        return []
-    return re.findall(r'^\s*name\s*=\s*(.+?)\s*$', content, re.MULTILINE)
+    content = _read_config(path)
+    names = (_block_name(content[s:e]) for s, e in _rule_blocks(content))
+    return [n for n in names if n]
 
 
 def _find_existing_rule(name, path):
-    try:
-        with open(os.path.expanduser(path)) as f:
-            lines = f.readlines()
-    except OSError:
-        return None
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if re.match(r'\s*windowrule\s*\{', line):
-            block = [line]
-            depth = line.count('{') - line.count('}')
-            i += 1
-            while i < len(lines) and depth > 0:
-                block.append(lines[i])
-                depth += lines[i].count('{') - lines[i].count('}')
-                i += 1
-            if re.search(rf'^\s*name\s*=\s*{re.escape(name)}\s*$',
-                         ''.join(block), re.MULTILINE):
-                return ''.join(block).rstrip()
-        else:
-            i += 1
+    content = _read_config(path)
+    for start, end in _rule_blocks(content):
+        block = content[start:end]
+        if _block_name(block) == name:
+            return block.rstrip()
     return None
 
 FIELDS = [
@@ -285,7 +331,7 @@ class HyprGlazWindow(Gtk.ApplicationWindow):
             'title':  re_escape(title),
             'ititle': re_escape(ititle),
             'size':   f'{sw} {sh}',
-            'prop':   'float = on' if win_info.get('floating') else '',
+            'prop':   'float = true' if win_info.get('floating') else '',
         }
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -464,7 +510,7 @@ class HyprGlazWindow(Gtk.ApplicationWindow):
         bad = []
         for i, line in enumerate(text.splitlines(), 1):
             s = line.strip()
-            if s and not s.startswith('#') and not _PROP_LINE_RE.match(line):
+            if s and not s.startswith('--') and not _PROP_LINE_RE.match(line):
                 bad.append(i)
         return bad
 
