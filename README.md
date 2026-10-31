@@ -52,7 +52,7 @@ Clear any field to drop it from the rule entirely.
 
 - **Close** — discard and exit
 - **Copy Rule** — copies the generated rule block (and force-position handler, if ticked) to the Wayland clipboard
-- **Save to Config** — writes the rule to the output file. If a rule with the same `name` already exists in the file it is replaced in-place, along with its force-position handler (added, updated, or removed to match the checkbox); otherwise the rule is appended. The button briefly shows `Saved (appended)` or `Saved (replaced)` to confirm.
+- **Save to Config** — writes the rule to the output file. If a rule with the same `name` already exists in the file it is replaced in-place, along with its force-position handler (added, updated, or removed to match the checkbox); otherwise the rule is appended. If no rule has that name but one has exactly the same `match` (Initial Class and Initial Title), the Name field switches to that rule's name, so it shows as the existing rule and Save replaces it instead of adding a duplicate. The button briefly shows `Saved (appended)` or `Saved (replaced)` to confirm.
 
 ## Keybinding
 

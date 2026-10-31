@@ -328,6 +328,40 @@ def _block_name(block):
     return next(g for g in m.groups() if g is not None)
 
 
+_MATCH_START_RE = re.compile(r'\bmatch\s*=\s*\{')
+
+_MATCH_ENTRY_RE = re.compile(
+    r'([A-Za-z_]\w*)\s*=\s*(?:"((?:[^"\\\n]|\\.)*)"|\'((?:[^\'\\\n]|\\.)*)\'|\[\[(.*?)\]\]|([^,}\s]+))',
+    re.DOTALL)
+
+_LUA_ESCAPES = {'n': '\n', 't': '\t', 'r': '\r'}
+
+
+def _lua_unescape(s):
+    return re.sub(r'\\(.)', lambda m: _LUA_ESCAPES.get(m.group(1), m.group(1)), s)
+
+
+def _block_match(block):
+    """Return the rule's match table as {key: value}, or {} if it has none."""
+    blank = _blank_literals(block)
+    m = _MATCH_START_RE.search(blank)
+    if not m:
+        return {}
+    end = blank.find('}', m.end())
+    body = block[m.end():len(block) if end < 0 else end]
+    match = {}
+    for e in _MATCH_ENTRY_RE.finditer(body):
+        dq, sq, long_, raw = e.group(2, 3, 4, 5)
+        if long_ is not None:
+            val = long_
+        elif raw is not None:
+            val = raw
+        else:
+            val = _lua_unescape(dq if dq is not None else sq)
+        match[e.group(1)] = val
+    return match
+
+
 def _read_config(path):
     try:
         with open(os.path.expanduser(path)) as f:
@@ -386,6 +420,18 @@ def _find_existing_rule(name, path):
             if span:
                 block = block.rstrip() + '\n\n' + content[span[0]:span[1]]
             return block.rstrip()
+    return None
+
+
+def _find_rule_name_by_match(match, path):
+    """Name of the first rule whose match table equals `match` exactly."""
+    if not match:
+        return None
+    content = _read_config(path)
+    for start, end in _rule_blocks(content):
+        block = content[start:end]
+        if _block_match(block) == match:
+            return _block_name(block)
     return None
 
 FIELDS = [
@@ -617,14 +663,24 @@ class HyprGlazWindow(Gtk.ApplicationWindow):
         return bad
 
     def _refresh(self):
+        v = self._values()
+        existing = _find_existing_rule(v['name'], self._output_path)
+        if not existing:
+            match = {k: val for k, val in (
+                ('initial_class', v['iclass']), ('initial_title', v['ititle'])) if val}
+            name = _find_rule_name_by_match(match, self._output_path)
+            if name and name != v['name']:
+                # switch to the matching rule so Save replaces it; set_text re-enters _refresh
+                self.entries['name'].set_text(name)
+                self._force_cb.set_active(
+                    _find_handler(_read_config(self._output_path), name) is not None)
+                return
         self._buf.set_text(self._current_rule(), -1)
-        existing = _find_existing_rule(self._values()['name'], self._output_path)
         if existing:
             self._existing_buf.set_text(existing, -1)
             self._existing_col.set_visible(True)
         else:
             self._existing_col.set_visible(False)
-        v = self._values()
         errors = self._prop_errors(v['prop'])
         if errors:
             self._prop_warn.set_label(f'Invalid line(s): {", ".join(map(str, errors))} — expected: key = value')
