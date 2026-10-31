@@ -8,11 +8,11 @@ Rules are emitted in Hyprland's Lua config format, ready to drop into an ML4W do
 hl.window_rule({
     name  = "glaz-btop",
     match = {
-        class = "btop",
         initial_class = "btop",
     },
 
     size  = "1904 1041",
+    move  = "8 60",
     float = true,
 })
 ```
@@ -40,7 +40,9 @@ Update path for the ML4W dotfiles custom window rules file `conf/windowrule.lua`
 
 ## UI
 
-The editor pre-fills all fields from the selected window's Hyprland client properties:
+The editor pre-fills all fields from the selected window's Hyprland client properties: initial class, initial title, size, and position (`at`, made relative to the window's monitor and emitted as `move`). Hyprland only applies `move` to floating windows.
+
+**Force position after open** is for apps that reposition themselves after mapping and so override `move` (e.g. JetBrains Toolbox, which pins itself to the screen corner). When ticked, the rule gets a `tag` and a `hl.on("window.open", ...)` handler is emitted after it that moves tagged windows to the At position 100 ms after they open. The handler is marked with a `-- glaz-force-position: <name>` comment so saving replaces or removes it along with its rule. At must be two plain integers for this.
 
 Clear any field to drop that match condition from the rule entirely.
 
