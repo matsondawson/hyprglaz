@@ -20,6 +20,16 @@ def active_workspace_id():
     return json.loads(raw)['id']
 
 
+def _monitor_relative_at(client):
+    """Window position relative to its monitor, as Hyprland's move rule expects."""
+    x, y = client['at']
+    raw = subprocess.check_output(['hyprctl', 'monitors', '-j'], text=True)
+    for m in json.loads(raw):
+        if m['id'] == client.get('monitor'):
+            return x - m['x'], y - m['y']
+    return x, y
+
+
 def _priority(c):
     return (0 if c.get('floating') else 1, c.get('focusHistoryID', 9999))
 
@@ -155,30 +165,71 @@ def gen_name(iclass, ititle):
     return f'glaz-{base}'
 
 
-def build_rule(name, class_, iclass, title, ititle, size, prop):
+def build_rule(name, iclass, ititle, size, at, prop, force=False):
     lines = ['hl.window_rule({', f'    name  = {lua_str(name)},']
 
     match = [f'        {key} = {lua_str(val)},' for key, val in (
-        ('class', class_), ('initial_class', iclass),
-        ('title', title), ('initial_title', ititle)) if val]
+        ('initial_class', iclass), ('initial_title', ititle)) if val]
     if match:
         lines.append('    match = {')
         lines.extend(match)
         lines.append('    },')
 
     props = [f'    size  = {lua_str(size)},'] if size else []
+    if at:
+        props.append(f'    move  = {lua_str(at)},')
     for p in prop.splitlines():
         s = p.strip()
         if s.startswith('--'):
             props.append(f'    {s}')
         elif s:
             props.append(f'    {s.rstrip(",")},')
+    if force:
+        props.append(f'    tag   = {lua_str("+" + name)},')
 
     if props:
         lines.append('')
         lines.extend(props)
     lines.append('})')
     return '\n'.join(lines)
+
+
+_AT_RE = re.compile(r'^\s*(-?\d+)\s+(-?\d+)\s*$')
+
+FORCE_MARK = '-- glaz-force-position: '
+
+
+def parse_at(at):
+    m = _AT_RE.match(at)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def build_force_handler(name, at):
+    """Lua handler that re-applies the position shortly after the window opens.
+
+    Some clients (XWayland apps like JetBrains Toolbox) move themselves after
+    mapping, overriding the rule's move. The rule tags matching windows so the
+    handler uses Hyprland's own matching.
+    """
+    x, y = parse_at(at)
+    tag = lua_str(name)
+    tag_dyn = lua_str(name + '*')
+    return '\n'.join([
+        f'hl.on("window.open", function(w) {FORCE_MARK}{name}',
+        '    for _, t in ipairs(w.tags) do',
+        f'        if t == {tag} or t == {tag_dyn} then',
+        '            hl.timer(function()',
+        '                local win = hl.get_window("address:" .. w.address)',
+        '                local m = win and win.monitor',
+        '                if m then',
+        f'                    hl.dispatch(hl.dsp.window.move({{ x = m.x + {x}, y = m.y + {y}, window = "address:" .. w.address }}))',
+        '                end',
+        '            end, { timeout = 100, type = "oneshot" })',
+        '            return',
+        '        end',
+        '    end',
+        'end)',
+    ])
 
 
 DEFAULT_CONF = '~/.config/hypr/conf/windowrules/custom.lua'
@@ -246,6 +297,30 @@ def _rule_blocks(text):
                     break
 
 
+_HANDLER_START_RE = re.compile(
+    r'^[^\S\n]*hl\.on\s*\(.*' + re.escape(FORCE_MARK) + r'(\S+)[^\S\n]*$',
+    re.MULTILINE)
+
+
+def _handler_blocks(text):
+    """Yield (start, end, name) spans of each hyprglaz force-position handler."""
+    blank = _blank_literals(text)
+    for m in _HANDLER_START_RE.finditer(text):
+        depth = 0
+        for i in range(m.start(), len(blank)):
+            if blank[i] == '(':
+                depth += 1
+            elif blank[i] == ')':
+                depth -= 1
+                if depth == 0:
+                    yield m.start(), i + 1, m.group(1)
+                    break
+
+
+def _find_handler(content, name):
+    return next(((s, e) for s, e, n in _handler_blocks(content) if n == name), None)
+
+
 def _block_name(block):
     m = _NAME_RE.search(block)
     if not m:
@@ -261,20 +336,30 @@ def _read_config(path):
         return ''
 
 
-def save_rule(rule_text, name, path):
+def save_rule(rule_text, handler_text, name, path):
     path = os.path.expanduser(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     content = _read_config(path)
 
+    span = _find_handler(content, name)
+    if span:
+        start, end = span
+        while start > 0 and content[start - 1] in ' \t\n':
+            start -= 1
+        content = content[:start] + content[end:]
+
     for start, end in _rule_blocks(content):
         if _block_name(content[start:end]) == name:
-            content = content[:start] + rule_text + content[end:]
+            new = rule_text + ('\n\n' + handler_text if handler_text else '')
+            content = content[:start] + new + content[end:]
             action = 'replaced'
             break
     else:
         sep = '' if not content.strip() else (
             '\n' if content.endswith('\n') else '\n\n')
         content = content + sep + rule_text + '\n'
+        if handler_text:
+            content += '\n' + handler_text + '\n'
         action = 'appended'
 
     with open(path, 'w') as f:
@@ -297,16 +382,18 @@ def _find_existing_rule(name, path):
     for start, end in _rule_blocks(content):
         block = content[start:end]
         if _block_name(block) == name:
+            span = _find_handler(content, name)
+            if span:
+                block = block.rstrip() + '\n\n' + content[span[0]:span[1]]
             return block.rstrip()
     return None
 
 FIELDS = [
     ('name',   'Name'),
-    ('class',  'Class'),
     ('iclass', 'Initial Class'),
-    ('title',  'Title'),
     ('ititle', 'Initial Title'),
     ('size',   'Size (W H)'),
+    ('at',     'At (X Y)'),
 ]
 
 
@@ -319,18 +406,16 @@ class HyprGlazWindow(Gtk.ApplicationWindow):
         self._output_path = output_path
 
         sw, sh = win_info['size']
-        class_  = win_info.get('class', '')
+        ax, ay = _monitor_relative_at(win_info)
         iclass  = win_info.get('initialClass', '')
-        title   = win_info.get('title', '')
         ititle  = win_info.get('initialTitle', '')
 
         defaults = {
             'name':   gen_name(iclass, ititle),
-            'class':  re_escape(class_),
             'iclass': re_escape(iclass),
-            'title':  re_escape(title),
             'ititle': re_escape(ititle),
             'size':   f'{sw} {sh}',
+            'at':     f'{ax} {ay}',
             'prop':   'float = true' if win_info.get('floating') else '',
         }
 
@@ -385,7 +470,14 @@ class HyprGlazWindow(Gtk.ApplicationWindow):
         prop_scroll.set_min_content_height(80)
         prop_scroll.set_child(prop_tv)
 
-        prop_row = len(FIELDS) + 1
+        force_row = len(FIELDS) + 1
+        self._force_cb = Gtk.CheckButton(label='Force position after open (for apps that move themselves)')
+        self._force_cb.set_active(
+            _find_handler(_read_config(output_path), defaults['name']) is not None)
+        self._force_cb.connect('toggled', lambda _c: self._refresh())
+        grid.attach(self._force_cb, 1, force_row, 1, 1)
+
+        prop_row = force_row + 1
         grid.attach(prop_lbl,    0, prop_row, 1, 1)
         grid.attach(prop_scroll, 1, prop_row, 1, 1)
 
@@ -501,10 +593,20 @@ class HyprGlazWindow(Gtk.ApplicationWindow):
         v['prop'] = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
         return v
 
-    def _current_rule(self):
+    def _force(self, v):
+        return self._force_cb.get_active() and parse_at(v['at']) is not None
+
+    def _current_parts(self):
         v = self._values()
-        return build_rule(v['name'], v['class'], v['iclass'],
-                          v['title'], v['ititle'], v['size'], v['prop'])
+        force = self._force(v)
+        rule = build_rule(v['name'], v['iclass'], v['ititle'],
+                          v['size'], v['at'], v['prop'], force)
+        handler = build_force_handler(v['name'], v['at']) if force else ''
+        return rule, handler
+
+    def _current_rule(self):
+        rule, handler = self._current_parts()
+        return rule + ('\n\n' + handler if handler else '')
 
     def _prop_errors(self, text):
         bad = []
@@ -527,6 +629,9 @@ class HyprGlazWindow(Gtk.ApplicationWindow):
         if errors:
             self._prop_warn.set_label(f'Invalid line(s): {", ".join(map(str, errors))} — expected: key = value')
             self._prop_warn.set_visible(True)
+        elif self._force_cb.get_active() and parse_at(v['at']) is None:
+            self._prop_warn.set_label('Force position needs At as two integers: X Y')
+            self._prop_warn.set_visible(True)
         else:
             self._prop_warn.set_visible(False)
         sensitive = not errors
@@ -544,7 +649,8 @@ class HyprGlazWindow(Gtk.ApplicationWindow):
 
     def _on_save(self, btn):
         v = self._values()
-        action = save_rule(self._current_rule(), v['name'], self._output_path)
+        rule, handler = self._current_parts()
+        action = save_rule(rule, handler, v['name'], self._output_path)
         btn.set_label(f'Saved ({action})')
         GLib.timeout_add(2000, self._reset_save_label)
 
