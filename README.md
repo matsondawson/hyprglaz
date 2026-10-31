@@ -42,17 +42,17 @@ Update path for the ML4W dotfiles custom window rules file `conf/windowrule.lua`
 
 The editor pre-fills all fields from the selected window's Hyprland client properties: initial class, initial title, size, and position (`at`, made relative to the window's monitor and emitted as `move`). Hyprland only applies `move` to floating windows.
 
-**Force position after open** is for apps that reposition themselves after mapping and so override `move` (e.g. JetBrains Toolbox, which pins itself to the screen corner). When ticked, the rule gets a `tag` and a `hl.on("window.open", ...)` handler is emitted after it that moves tagged windows to the At position 100 ms after they open. The handler is marked with a `-- glaz-force-position: <name>` comment so saving replaces or removes it along with its rule. At must be two plain integers for this.
-
-Clear any field to drop that match condition from the rule entirely.
+Clear any field to drop it from the rule entirely.
 
 **Extra Properties** takes one Lua `key = value` pair per line — the trailing commas are added for you. Use Lua literals, so `float = true`, `size = "70% 60%"`, `border_size = 0`, and `-- comments` where you want them. Values in match fields are regexes and are escaped for you; a regex containing backslashes is emitted as a `[[...]]` long string so Lua leaves it intact.
+
+**Force position after open** is for apps that reposition themselves after mapping and so override `move` (e.g. JetBrains Toolbox, which pins itself to the screen corner). When ticked, the rule gets a `tag` and a `hl.on("window.open", ...)` handler is emitted after it that moves tagged windows to the At position 100 ms after they open. The handler is marked with a `-- glaz-force-position: <name>` comment so saving replaces or removes it along with its rule. At must be two plain integers for this.
 
 ### Buttons
 
 - **Close** — discard and exit
-- **Copy Rule** — copies the generated rule block to the Wayland clipboard
-- **Save to Config** — writes the rule to the output file. If a rule with the same `name` already exists in the file it is replaced in-place; otherwise the rule is appended. The button briefly shows `Saved (appended)` or `Saved (replaced)` to confirm.
+- **Copy Rule** — copies the generated rule block (and force-position handler, if ticked) to the Wayland clipboard
+- **Save to Config** — writes the rule to the output file. If a rule with the same `name` already exists in the file it is replaced in-place, along with its force-position handler (added, updated, or removed to match the checkbox); otherwise the rule is appended. The button briefly shows `Saved (appended)` or `Saved (replaced)` to confirm.
 
 ## Keybinding
 
